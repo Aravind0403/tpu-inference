@@ -28,6 +28,8 @@ from vllm.model_executor.layers import linear as vllm_linear
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (FusedMoEMethodBase,
                                                   RoutedExperts)
+from vllm.model_executor.layers.fused_moe.oracle.fp8 import \
+    refine_fp8_moe_block_shape
 from vllm.model_executor.layers.quantization import fp8 as vllm_fp8
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
@@ -378,8 +380,8 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod, VllmQuantizationMethod):
         self.moe_block_shape = self.weight_block_size
         if self.block_quant:
             assert self.weight_block_size is not None
-            refined_shape = vllm_fp8.refine_fp8_moe_block_shape(
-                self.moe, self.weight_block_size)
+            refined_shape = refine_fp8_moe_block_shape(self.moe,
+                                                       self.weight_block_size)
             if refined_shape is not None:
                 block_n, block_k = self.weight_block_size
                 self.weight_scale_refine = (
