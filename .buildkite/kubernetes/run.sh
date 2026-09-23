@@ -23,28 +23,37 @@ if [[ $# -lt 1 ]]; then
   exit 2
 fi
 
-# From the step's environment, not an argument: every step already sets SHAPE
-# from one of the shape anchors, and passed the same value straight back in.
-shape="${SHAPE:-}"
-machine_type="${shape%%/*}"
-topology="${shape#*/}"
-if [[ -z "$shape" || "$machine_type" == "$shape" || -z "$topology" ]]; then
-  echo "$0: SHAPE must be <machine-type>/<topology>, got '${shape}'" >&2
+# A manifest carries its own nodeSelector, so it answers the shape question
+# that SHAPE answers for a plain Job; asking for both would let them disagree.
+if [[ -z "${MULTIHOST_MANIFEST:-}" ]]; then
+  # From the step's environment, not an argument: every step already sets SHAPE
+  # from one of the shape anchors, and passed the same value straight back in.
+  shape="${SHAPE:-}"
+  machine_type="${shape%%/*}"
+  topology="${shape#*/}"
+  if [[ -z "$shape" || "$machine_type" == "$shape" || -z "$topology" ]]; then
+    echo "$0: SHAPE must be <machine-type>/<topology>, got '${shape}'" >&2
+    exit 2
+  fi
+
+  # TPU_VERSION only labels and gates steps; the hardware comes from the shape.
+  # Setting one without the other runs v7x-gated tests on v6e chips and reports
+  # them as v7x, so refuse rather than produce a mislabelled result.
+  case "${TPU_VERSION:-tpu6e}:${machine_type}" in
+    tpu7x:tpu7x-*|tpu6e:ct6e-*) ;;
+    *)
+      echo "$0: TPU_VERSION=${TPU_VERSION:-tpu6e} does not match shape ${shape}." >&2
+      echo "  A v7x run needs TPU_VERSION=tpu7x with KUBE_SHAPE_SINGLE and" >&2
+      echo "  KUBE_SHAPE_MULTI set to tpu7x shapes." >&2
+      exit 2
+      ;;
+  esac
+elif [[ "${TPU_VERSION:-tpu6e}" != "tpu7x" ]]; then
+  # The only slice manifest here is 2x2x2 tpu7x. Same mislabelling risk as
+  # above, minus the shape to read it from.
+  echo "$0: ${MULTIHOST_MANIFEST} is a tpu7x slice; TPU_VERSION=${TPU_VERSION:-tpu6e}" >&2
   exit 2
 fi
-
-# TPU_VERSION only labels and gates steps; the hardware comes from the shape.
-# Setting one without the other runs v7x-gated tests on v6e chips and reports
-# them as v7x, so refuse rather than produce a mislabelled result.
-case "${TPU_VERSION:-tpu6e}:${machine_type}" in
-  tpu7x:tpu7x-*|tpu6e:ct6e-*) ;;
-  *)
-    echo "$0: TPU_VERSION=${TPU_VERSION:-tpu6e} does not match shape ${shape}." >&2
-    echo "  A v7x run needs TPU_VERSION=tpu7x with KUBE_SHAPE_SINGLE and" >&2
-    echo "  KUBE_SHAPE_MULTI set to tpu7x shapes." >&2
-    exit 2
-    ;;
-esac
 
 WORKLOAD_IMAGE="${WORKLOAD_IMAGE:-$(buildkite-agent meta-data get ci-image 2>/dev/null || true)}"
 export WORKLOAD_IMAGE
@@ -111,6 +120,19 @@ export VLLM_XLA_CACHE_PATH="${JAX_COMPILATION_CACHE_DIR}"
 # The launcher's built-in Job is one pod holding every chip on one host.
 # Anything more - roles that must find each other, a slice across hosts - needs
 # a JobSet passed with --manifest.
+if [[ -n "${MULTIHOST_MANIFEST:-}" ]]; then
+  here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
+  # Passed by name rather than substituted into the manifest, where a quote or
+  # a brace would be a YAML parse error. NUL-delimited so the pod recovers the
+  # argument vector instead of re-splitting a string.
+  MULTIHOST_ARGS_B64="$(printf '%s\0' "$@" | base64 | tr -d '\n')"
+  export MULTIHOST_ARGS_B64
+  env_args+=(--env MULTIHOST_ARGS_B64)
+  exec /opt/launcher/launch \
+    --manifest "${here}/manifests/workloads/${MULTIHOST_MANIFEST}" \
+    "${env_args[@]}"
+fi
+
 exec /opt/launcher/launch \
   --machine-type "$machine_type" \
   --topology "$topology" \
